@@ -141,7 +141,18 @@ async def main():
     app.add_handler(conv)
 
     print("🤖 Bot en marcha. Esperando fotos...")
-    await app.run_polling()
+
+# Arranque manual compatible con Render
+await app.initialize()
+await app.start()
+await app.updater.start_polling()
+
+# Mantener el proceso vivo hasta que Render o tú lo detengan
+await app.updater.wait_until_closed()
+
+# Apagado ordenado
+await app.stop()
+await app.shutdown()
 
 # ================= ENTRY =================
 if __name__ == "__main__":
@@ -162,4 +173,5 @@ if __name__ == "__main__":
         asyncio.set_event_loop(loop)
         loop.run_until_complete(safe_start())
         loop.run_forever()
+
 
