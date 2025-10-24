@@ -157,21 +157,13 @@ await app.shutdown()
 # ================= ENTRY =================
 if __name__ == "__main__":
     import asyncio
-
-    async def safe_start():
-        try:
-            await main()
-        except RuntimeError as e:
-            print(f"⚠️ Aviso: {e}")
-
     try:
-        # Render necesita mantener el loop activo permanentemente
-        asyncio.run(safe_start())
-    except (RuntimeError, KeyboardInterrupt):
-        # En Render esto evita el cierre del proceso
+        asyncio.run(main())
+    except RuntimeError:
+        # Si el entorno ya tiene/unifica loops, creamos uno nuevo y corremos ahí.
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(safe_start())
-        loop.run_forever()
+        loop.run_until_complete(main())
+
 
 
