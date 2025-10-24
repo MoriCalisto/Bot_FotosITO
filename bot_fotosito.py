@@ -145,9 +145,21 @@ async def main():
 
 # ================= ENTRY =================
 if __name__ == "__main__":
+    import asyncio
+
+    async def safe_start():
+        try:
+            await main()
+        except RuntimeError as e:
+            print(f"⚠️ Aviso: {e}")
+
     try:
-        asyncio.run(main())
-    except RuntimeError:
+        # Render necesita mantener el loop activo permanentemente
+        asyncio.run(safe_start())
+    except (RuntimeError, KeyboardInterrupt):
+        # En Render esto evita el cierre del proceso
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
+        loop.run_until_complete(safe_start())
+        loop.run_forever()
+
