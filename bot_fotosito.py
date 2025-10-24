@@ -1,23 +1,28 @@
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram (Render friendly)
-- Una sola pregunta: BR-OR, BR-PON, TALL-OR, TALL-PON, LOE-OR, LOE-PON
+- Pregunta única: BR-OR, BR-PON, TALL-OR, TALL-PON, LOE-OR, LOE-PON
 - Guarda en subcarpetas y registra CSV
+- Incluye microservidor HTTP (aiohttp) para satisfacer el healthcheck de Render
 """
 
 import os
 import asyncio
+import signal
 import logging
 from datetime import datetime
+
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ConversationHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
 
+from aiohttp import web  # micro web server para Render
+
 # ================= CONFIG =================
-TOKEN = os.getenv("BOT_TOKEN", "").strip()  # en Render: Environment → BOT_TOKEN
-PHOTO_SAVE_ROOT = os.getenv("PHOTO_SAVE_ROOT", "./photos")  # en Render: ./photos o /data si usas Disk
+TOKEN = os.getenv("BOT_TOKEN", "").strip()                 # Render: Environment → BOT_TOKEN
+PHOTO_SAVE_ROOT = os.getenv("PHOTO_SAVE_ROOT", "./photos") # En Render es un FS efímero (sirve para procesar), OneDrive se puede reactivar luego
 PRINCIPAL_CHOICES = ["BR-OR", "BR-PON", "TALL-OR", "TALL-PON", "LOE-OR", "LOE-PON"]
 CSV_LOG = os.path.join(PHOTO_SAVE_ROOT, "registro_fotos.csv")
 ASK_PRINCIPAL = 0
@@ -26,7 +31,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("BotFotosITO")
+log = logging.getLogger("BotFotosITO")
 
 os.makedirs(PHOTO_SAVE_ROOT, exist_ok=True)
 
@@ -49,7 +54,7 @@ def frente_from_codigo(codigo: str) -> str:
 
 ensure_csv()
 
-# ================= HANDLERS =================
+# ================= HANDLERS BOT =================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Envíame una *foto*.\n"
@@ -123,11 +128,35 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Operación cancelada. Envía una foto para comenzar de nuevo.")
     return ConversationHandler.END
 
+# ================= MICROSERVER (para Render) =================
+async def handle_root(_):
+    return web.Response(text="Bot_FotosITO OK")
+
+async def make_web_app():
+    app = web.Application()
+    app.router.add_get("/", handle_root)
+    app.router.add_get("/healthz", handle_root)
+    return app
+
+async def start_web_server():
+    app = await make_web_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"HTTP server listening on 0.0.0.0:{port}")
+    return runner
+
 # ================= MAIN (Render friendly) =================
 async def main():
     if not TOKEN:
         raise RuntimeError("🔑 BOT_TOKEN no configurado en variables de entorno.")
 
+    # 1) Arrancar microservidor HTTP para Render
+    web_runner = await start_web_server()
+
+    # 2) Inicializar bot
     app = Application.builder().token(TOKEN).build()
 
     conv = ConversationHandler(
@@ -136,25 +165,34 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
-
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
 
+    log.info("Iniciando bot…")
     print("🤖 Bot en marcha. Esperando fotos...")
 
-    # Arranque manual compatible con Render (sin run_polling)
+    # Arranque manual: sin run_polling (evita conflictos con el event loop de Render)
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
-    try:
-        # Mantener vivo el proceso hasta que se cierre el updater
-        await app.updater.wait_until_closed()
-    finally:
-        # Apagado ordenado si Render detiene el servicio
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+    # 3) Mantener proceso vivo hasta SIGINT/SIGTERM (Render detiene con estas señales)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            # Windows o entornos sin señales: ignorar
+            pass
+
+    await stop.wait()
+
+    # 4) Apagado ordenado
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+    await web_runner.cleanup()
 
 # ================= ENTRYPOINT =================
 if __name__ == "__main__":
@@ -165,6 +203,7 @@ if __name__ == "__main__":
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(main())
+
 
 
 
