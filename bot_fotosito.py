@@ -147,6 +147,7 @@ def get_graph_token():
         token_cache=cache,
     )
 
+    # Intento silencioso
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(MS_SCOPES, account=accounts[0])
@@ -154,18 +155,15 @@ def get_graph_token():
             save_cache(cache)
             return result["access_token"]
 
+    # Si no hay token aún, NO bloquear aquí
     flow = app.initiate_device_flow(scopes=MS_SCOPES)
     if "user_code" not in flow:
         raise RuntimeError("Fallo iniciando device code flow.")
 
     log.info(f"Autoriza OneDrive: {flow['message']}")
-    result = app.acquire_token_by_device_flow(flow)
-    save_cache(cache)
-
-    if "access_token" not in result:
-        raise RuntimeError(f"No se obtuvo token: {result.get('error_description')}")
-
-    return result["access_token"]
+    raise RuntimeError(
+        f"OneDrive no autorizado aún. Abre https://login.microsoft.com/device e ingresa el código {flow['user_code']}"
+    )
 
 
 def upload_to_onedrive(local_path: str, remote_dir: str, filename: str):
