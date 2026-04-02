@@ -31,7 +31,7 @@ ASK_PRINCIPAL = 0
 # OneDrive / Graph
 MS_CLIENT_ID = os.getenv("MS_CLIENT_ID", "")        # App (client) ID
 MS_TENANT_ID = os.getenv("MS_TENANT_ID", "common")  # "common" o tu tenant
-MS_SCOPES = ["Files.ReadWrite", "offline_access"]
+MS_SCOPES = ["Files.ReadWrite"]
 # Carpeta destino en OneDrive (se crea si no existe)
 ONEDRIVE_ROOT = os.getenv("ONEDRIVE_ROOT", "Bot_FotosITO")
 
@@ -227,7 +227,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # =============== APP/RUN ===============
-async def main():
+# =============== APP/RUN ===============
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
@@ -236,11 +237,16 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True
     )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
 
-    log.info(f"Bot iniciado. Guardando local en: {os.path.abspath(PHOTO_SAVE_ROOT)}  | OneDrive root: /{ONEDRIVE_ROOT}")
-    await app.run_polling()
+    log.info(
+        f"Bot iniciado. Guardando local en: {os.path.abspath(PHOTO_SAVE_ROOT)}  | OneDrive root: /{ONEDRIVE_ROOT}"
+    )
+
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
