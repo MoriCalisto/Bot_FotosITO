@@ -231,6 +231,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
+    app.bot.delete_webhook(drop_pending_updates=True)
+
     conv = ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO, on_photo)],
         states={ASK_PRINCIPAL: [CallbackQueryHandler(choose_principal)]},
@@ -241,12 +243,4 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
 
-    log.info(
-        f"Bot iniciado. Guardando local en: {os.path.abspath(PHOTO_SAVE_ROOT)}  | OneDrive root: /{ONEDRIVE_ROOT}"
-    )
-
     app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
