@@ -22,7 +22,7 @@ from telegram.ext import (
 # =============== CONFIG ===============
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
-    raise RuntimeError("Define BOT_TOKEN en Render (Environment > Secret).")
+    raise RuntimeError("Define BOT_TOKEN en Render.")
 
 PHOTO_SAVE_ROOT = os.getenv("PHOTO_SAVE_ROOT", "./photos")
 os.makedirs(PHOTO_SAVE_ROOT, exist_ok=True)
@@ -32,121 +32,55 @@ CSV_LOG = os.path.join(PHOTO_SAVE_ROOT, "registro_fotos.csv")
 CSV_HEADER = "Archivo,Frente,Ubicacion,FechaHora\n"
 ASK_PRINCIPAL = 0
 
-# OneDrive / Graph
 MS_CLIENT_ID = os.getenv("MS_CLIENT_ID", "")
 MS_TENANT_ID = os.getenv("MS_TENANT_ID", "common")
 MS_SCOPES = ["Files.ReadWrite"]
 ONEDRIVE_ROOT = os.getenv("ONEDRIVE_ROOT", "Bot_FotosITO")
 TOKEN_CACHE_PATH = os.getenv("TOKEN_CACHE_PATH", "./token_cache.bin")
 
-# Render healthcheck
 PORT = int(os.getenv("PORT", "10000"))
 
-# =============== LOGGING ===============
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("BotFotosITO")
 
-# Guardamos flows temporales por chat para terminar login manualmente
 PENDING_ONEDRIVE_FLOWS = {}
 
-
-# =============== HEALTHCHECK SERVER ===============
+# =============== HEALTHCHECK ===============
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"OK")
 
-    def log_message(self, format, *args):
-        return
-
-
-def start_healthcheck_server():
+def start_healthcheck():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    log.info(f"Healthcheck HTTP server escuchando en 0.0.0.0:{PORT}")
-    return server
-
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log.info(f"Healthcheck activo en puerto {PORT}")
 
 # =============== CSV ===============
 def ensure_csv():
     if not os.path.exists(CSV_LOG):
-        with open(CSV_LOG, "w", encoding="utf-8") as f:
+        with open(CSV_LOG, "w") as f:
             f.write(CSV_HEADER)
-        return
-
-    try:
-        with open(CSV_LOG, "r", encoding="utf-8") as f:
-            first = f.readline()
-
-        if first.strip() != CSV_HEADER.strip():
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup = os.path.join(PHOTO_SAVE_ROOT, f"registro_fotos-{ts}.bak.csv")
-            os.replace(CSV_LOG, backup)
-
-            with open(CSV_LOG, "w", encoding="utf-8") as f:
-                f.write(CSV_HEADER)
-
-            log.info(f"CSV antiguo respaldado como: {backup}")
-    except Exception as e:
-        log.warning(f"No se pudo validar CSV, recreando: {e}")
-        with open(CSV_LOG, "w", encoding="utf-8") as f:
-            f.write(CSV_HEADER)
-
 
 ensure_csv()
 
-
-# =============== UTILS ===============
-def frente_from_codigo(codigo: str) -> str:
-    if codigo.startswith("BR"):
-        return "BREMEN"
-    if codigo.startswith("TALL"):
-        return "TALLERES"
-    if codigo.startswith("LOE"):
-        return "LO ERRAZURIZ"
-    return "N/A"
-
-
-def ensure_saved(path: str) -> None:
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
-    if os.path.getsize(path) <= 0:
-        raise IOError("Archivo vacío")
-
-
-# ---------- MSAL helpers ----------
+# =============== MSAL ===============
 def load_cache():
     cache = msal.SerializableTokenCache()
     if os.path.exists(TOKEN_CACHE_PATH):
-        try:
-            with open(TOKEN_CACHE_PATH, "r", encoding="utf-8") as f:
-                cache.deserialize(f.read())
-        except Exception:
-            pass
+        cache.deserialize(open(TOKEN_CACHE_PATH).read())
     return cache
-
 
 def save_cache(cache):
     if cache.has_state_changed:
-        with open(TOKEN_CACHE_PATH, "w", encoding="utf-8") as f:
-            f.write(cache.serialize())
-
+        open(TOKEN_CACHE_PATH, "w").write(cache.serialize())
 
 def get_graph_token():
-    if not MS_CLIENT_ID:
-        raise RuntimeError("Define MS_CLIENT_ID en Render (tu App Client ID).")
-
-    authority = f"https://login.microsoftonline.com/{MS_TENANT_ID}"
     cache = load_cache()
     app = msal.PublicClientApplication(
         MS_CLIENT_ID,
-        authority=authority,
+        authority=f"https://login.microsoftonline.com/{MS_TENANT_ID}",
         token_cache=cache,
     )
 
@@ -154,237 +88,118 @@ def get_graph_token():
     if accounts:
         result = app.acquire_token_silent(MS_SCOPES, account=accounts[0])
         if result and "access_token" in result:
-            save_cache(cache)
             return result["access_token"]
 
-    raise RuntimeError(
-        "OneDrive no autorizado aún. Usa /onedrive_login y luego /onedrive_finish."
-    )
+    raise RuntimeError("Debes ejecutar /onedrive_login")
 
-
-def upload_to_onedrive(local_path: str, remote_dir: str, filename: str):
+def upload_to_onedrive(local_path, remote_dir, filename):
     token = get_graph_token()
-    remote_path = f"/{ONEDRIVE_ROOT}/{remote_dir}/{filename}".replace("//", "/")
-    url = f"https://graph.microsoft.com/v1.0/me/drive/root:{remote_path}:/content"
+    url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{ONEDRIVE_ROOT}/{remote_dir}/{filename}:/content"
 
     with open(local_path, "rb") as f:
         r = requests.put(url, headers={"Authorization": f"Bearer {token}"}, data=f)
 
     if r.status_code not in (200, 201):
-        raise RuntimeError(f"Graph upload error {r.status_code}: {r.text}")
-
+        raise RuntimeError(r.text)
 
 # =============== COMMANDS ===============
-async def cmd_onedrive_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    if not MS_CLIENT_ID:
-        await update.message.reply_text("❌ Falta MS_CLIENT_ID en Render.")
-        return
-
-    authority = f"https://login.microsoftonline.com/{MS_TENANT_ID}"
-    cache = load_cache()
-    app = msal.PublicClientApplication(
-        MS_CLIENT_ID,
-        authority=authority,
-        token_cache=cache,
-    )
-
+async def onedrive_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    app = msal.PublicClientApplication(MS_CLIENT_ID)
     flow = app.initiate_device_flow(scopes=MS_SCOPES)
-    if "user_code" not in flow:
-        await update.message.reply_text("❌ No se pudo iniciar el login de OneDrive.")
+
+    PENDING_ONEDRIVE_FLOWS[str(update.effective_chat.id)] = (app, flow)
+
+    await update.message.reply_text(flow["message"])
+
+async def onedrive_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+
+    if chat_id not in PENDING_ONEDRIVE_FLOWS:
+        await update.message.reply_text("Primero ejecuta /onedrive_login")
         return
 
-    chat_id = str(update.message.chat_id)
-    PENDING_ONEDRIVE_FLOWS[chat_id] = {
-        "flow": flow,
-        "cache": cache,
-        "created_at": datetime.now().isoformat(),
-    }
-
-    mensaje = flow.get("message", "")
-    log.info(f"Autoriza OneDrive manual: {mensaje}")
-
-    await update.message.reply_text(
-        "🔐 Autorización OneDrive iniciada.\n\n"
-        f"{mensaje}\n\n"
-        "Cuando termines en Microsoft, vuelve aquí y escribe:\n"
-        "/onedrive_finish"
-    )
-
-
-async def cmd_onedrive_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    chat_id = str(update.message.chat_id)
-    pending = PENDING_ONEDRIVE_FLOWS.get(chat_id)
-
-    if not pending:
-        await update.message.reply_text(
-            "⚠️ No hay una autorización pendiente.\n"
-            "Primero ejecuta /onedrive_login"
-        )
-        return
-
-    flow = pending["flow"]
-    cache = pending["cache"]
-
-    authority = f"https://login.microsoftonline.com/{MS_TENANT_ID}"
-    app = msal.PublicClientApplication(
-        MS_CLIENT_ID,
-        authority=authority,
-        token_cache=cache,
-    )
-
+    app, flow = PENDING_ONEDRIVE_FLOWS[chat_id]
     result = app.acquire_token_by_device_flow(flow)
 
     if "access_token" in result:
-        save_cache(cache)
-        PENDING_ONEDRIVE_FLOWS.pop(chat_id, None)
-        await update.message.reply_text("✅ OneDrive autorizado correctamente.")
+        save_cache(app.token_cache)
+        await update.message.reply_text("✅ OneDrive listo")
     else:
-        await update.message.reply_text(
-            "❌ Aún no se pudo obtener el token.\n"
-            f"Detalle: {result.get('error_description', 'sin detalle')}"
-        )
-
+        await update.message.reply_text("❌ Error en autorización")
 
 # =============== HANDLERS ===============
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Envíame una foto.\n"
-        "Luego elige el frente/sector:\n"
-        "BR-OR, BR-PON, TALL-OR, TALL-PON, LOE-OR, LOE-PON.\n\n"
-        "Comandos útiles:\n"
-        "/onedrive_login → iniciar autorización OneDrive\n"
-        "/onedrive_finish → terminar autorización OneDrive\n\n"
-        f"📂 Local: {os.path.abspath(PHOTO_SAVE_ROOT)}\n"
-        f"☁️ OneDrive: /{ONEDRIVE_ROOT}/<frente>/archivo.jpg"
-    )
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Envía una foto")
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.photo:
-        return
+    photo = await update.message.photo[-1].get_file()
 
-    photo_file = await update.message.photo[-1].get_file()
-    fecha_hora = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+    now = datetime.now()
     user = update.message.from_user
-    safe_user = user.username or "user"
-    nombre_archivo = f"{safe_user}_{user.id}_{fecha_hora}.jpg"
+    usuario = user.username or user.first_name or str(user.id)
+    usuario = usuario.replace(" ", "_")
 
     context.user_data["pending"] = {
-        "file": photo_file,
-        "nombre": nombre_archivo,
-        "fecha": fecha_hora,
+        "file": photo,
+        "fecha": now.strftime("%Y-%m-%d"),
+        "hora": now.strftime("%H-%M-%S"),
+        "usuario": usuario,
     }
 
-    kb = [
-        [
-            InlineKeyboardButton("BR-OR", callback_data="BR-OR"),
-            InlineKeyboardButton("BR-PON", callback_data="BR-PON"),
-        ],
-        [
-            InlineKeyboardButton("TALL-OR", callback_data="TALL-OR"),
-            InlineKeyboardButton("TALL-PON", callback_data="TALL-PON"),
-        ],
-        [
-            InlineKeyboardButton("LOE-OR", callback_data="LOE-OR"),
-            InlineKeyboardButton("LOE-PON", callback_data="LOE-PON"),
-        ],
-    ]
+    kb = [[InlineKeyboardButton(x, callback_data=x)] for x in PRINCIPAL_CHOICES]
 
     await update.message.reply_text(
-        "🏷️ Selecciona frente/sector:",
-        reply_markup=InlineKeyboardMarkup(kb),
+        "Selecciona frente",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
     return ASK_PRINCIPAL
 
-
-async def choose_principal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    principal = q.data
-    if principal not in PRINCIPAL_CHOICES:
-        await q.edit_message_text("❗ Opción no válida. Intenta de nuevo.")
-        return ASK_PRINCIPAL
+    data = context.user_data["pending"]
 
-    pending = context.user_data.get("pending")
-    if not pending:
-        await q.edit_message_text("⚠️ No encuentro la foto. Envía una foto otra vez.")
-        return ConversationHandler.END
+    nombre = f"{data['fecha']}_{data['hora']}_{q.data}_{data['usuario']}.jpg"
 
-    photo_file = pending["file"]
-    nombre = pending["nombre"]
-    fecha = pending["fecha"]
+    path = os.path.join(PHOTO_SAVE_ROOT, q.data)
+    os.makedirs(path, exist_ok=True)
 
-    subdir = os.path.join(PHOTO_SAVE_ROOT, principal)
-    os.makedirs(subdir, exist_ok=True)
-    dest_path = os.path.join(subdir, nombre)
+    full_path = os.path.join(path, nombre)
 
-    await photo_file.download_to_drive(custom_path=dest_path)
-    ensure_saved(dest_path)
+    await data["file"].download_to_drive(full_path)
 
-    frente = frente_from_codigo(principal)
-    with open(CSV_LOG, "a", encoding="utf-8") as f:
-        f.write(f"{nombre},{frente},{principal},{fecha}\n")
+    with open(CSV_LOG, "a") as f:
+        f.write(f"{nombre},{q.data},{q.data},{data['fecha']}\n")
 
     try:
-        upload_to_onedrive(dest_path, remote_dir=principal, filename=nombre)
-        od_note = "☁️ Subida a OneDrive OK."
+        upload_to_onedrive(full_path, q.data, nombre)
+        msg = "☁️ Subido a OneDrive"
     except Exception as e:
-        od_note = f"⚠️ OneDrive falló: {e}"
-        log.error(od_note)
+        msg = f"⚠️ {e}"
 
-    context.user_data.clear()
+    await q.edit_message_text(f"✅ Guardado\n{nombre}\n{msg}")
 
-    await q.edit_message_text(
-        "✅ Guardado.\n"
-        f"📁 Local: {os.path.abspath(subdir)}\n"
-        f"🗂️ Archivo: {nombre}\n"
-        f"🕒 {fecha}\n"
-        f"{od_note}"
-    )
     return ConversationHandler.END
 
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("🛑 Cancelado. Envía una foto para comenzar de nuevo.")
-    return ConversationHandler.END
-
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    log.exception("Unhandled exception", exc_info=context.error)
-
-
+# =============== MAIN ===============
 def main():
-    start_healthcheck_server()
+    start_healthcheck()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO, on_photo)],
-        states={ASK_PRINCIPAL: [CallbackQueryHandler(choose_principal)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
+        states={ASK_PRINCIPAL: [CallbackQueryHandler(choose)]},
+        fallbacks=[],
     )
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("onedrive_login", cmd_onedrive_login))
-    app.add_handler(CommandHandler("onedrive_finish", cmd_onedrive_finish))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("onedrive_login", onedrive_login))
+    app.add_handler(CommandHandler("onedrive_finish", onedrive_finish))
     app.add_handler(conv)
-    app.add_error_handler(error_handler)
-
-    log.info(
-        f"Bot iniciado. Guardando local en: {os.path.abspath(PHOTO_SAVE_ROOT)}  | OneDrive root: /{ONEDRIVE_ROOT}"
-    )
 
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
